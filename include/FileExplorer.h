@@ -4,7 +4,6 @@
 
 #include <string>
 #include <thread>
-#include <unordered_map>
 
 class FileExplorer
 {
@@ -26,7 +25,6 @@ private:
     bool ScanDirectoryIntoState(const std::wstring& path);
     void CloseDirectoryHandle();
     void PushChangeEvent(const std::wstring& fileName, FileChangeType type);
-    bool ShouldDropDuplicate(const std::wstring& fileName, FileChangeType type, ULONGLONG now);
     FileChangeType ConvertAction(DWORD action) const;
     std::wstring ResolveCdTarget(const std::wstring& command) const;
 
@@ -37,5 +35,4 @@ private:
     DWORD m_threadId;
     std::atomic<bool> m_stopRequested;
     std::wstring m_watchedPath;
-    std::unordered_map<std::wstring, ULONGLONG> m_debounceTicks;
 };

@@ -6,7 +6,7 @@
 
 namespace
 {
-constexpr DWORD kNotifyFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE;
+constexpr DWORD kNotifyFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE;
 constexpr DWORD kDebounceMs = 350;
 constexpr size_t kMaxEvents = 200;
 
@@ -229,7 +229,6 @@ bool FileExplorer::RestartWatcherLocked(const std::wstring& newPath)
     CloseDirectoryHandle();
     m_stopRequested.store(false);
     m_watchedPath = newPath;
-    m_debounceTicks.clear();
 
     if (!ScanDirectoryIntoState(newPath))
     {
@@ -284,12 +283,20 @@ void FileExplorer::CloseDirectoryHandle()
 void FileExplorer::PushChangeEvent(const std::wstring& fileName, FileChangeType type)
 {
     ULONGLONG now = GetTickCount64();
-    if (ShouldDropDuplicate(fileName, type, now))
-    {
-        return;
-    }
 
     ScopedCriticalSection lock(&m_state.cs);
+
+    // Coalesce events for the same file within the debounce window into one entry.
+    for (auto& existing : m_state.changes)
+    {
+        if (existing.fileName == fileName && now - existing.tick < kDebounceMs)
+        {
+            existing.type = type;
+            existing.tick = now;
+            return;
+        }
+    }
+
     FileChangeEvent event;
     event.fileName = fileName;
     event.type = type;
@@ -299,19 +306,6 @@ void FileExplorer::PushChangeEvent(const std::wstring& fileName, FileChangeType 
     {
         m_state.changes.pop_back();
     }
-}
-
-bool FileExplorer::ShouldDropDuplicate(const std::wstring& fileName, FileChangeType type, ULONGLONG now)
-{
-    std::wstring key = std::to_wstring(static_cast<int>(type)) + L":" + fileName;
-    auto found = m_debounceTicks.find(key);
-    if (found != m_debounceTicks.end() && now - found->second < kDebounceMs)
-    {
-        return true;
-    }
-
-    m_debounceTicks[key] = now;
-    return false;
 }
 
 FileChangeType FileExplorer::ConvertAction(DWORD action) const
