@@ -50,7 +50,9 @@ ConsoleUI::ConsoleUI(SharedState& state)
       m_instance(nullptr),
       m_hwnd(nullptr),
       m_font(nullptr),
-      m_titleFont(nullptr)
+      m_titleFont(nullptr),
+      m_searchBox(nullptr),
+      m_searchBrush(nullptr)
 {
 }
 
@@ -132,6 +134,11 @@ void ConsoleUI::Shutdown()
         DeleteObject(m_titleFont);
         m_titleFont = nullptr;
     }
+    if (m_searchBrush)
+    {
+        DeleteObject(m_searchBrush);
+        m_searchBrush = nullptr;
+    }
 }
 
 LRESULT CALLBACK ConsoleUI::WindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
@@ -161,10 +168,40 @@ LRESULT ConsoleUI::HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
     {
     case WM_CREATE:
         SetTimer(hwnd, kRefreshTimer, 100, nullptr);
+        m_searchBox = CreateWindowExW(
+            0, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            0, 0, 100, 30,
+            hwnd, reinterpret_cast<HMENU>(101), m_instance, nullptr);
+        m_searchBrush = CreateSolidBrush(Rgb(45, 45, 45));
+        SendMessageW(m_searchBox, WM_SETFONT, reinterpret_cast<WPARAM>(m_font), TRUE);
         return 0;
     case WM_SIZE:
+    {
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        if (m_searchBox)
+            SetWindowPos(m_searchBox, nullptr,
+                client.right - 220, 57, 198, 28, SWP_NOZORDER);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
+    }
+    case WM_COMMAND:
+        if (HIWORD(wparam) == EN_CHANGE && LOWORD(wparam) == 101)
+        {
+            wchar_t buf[512]{};
+            GetWindowTextW(m_searchBox, buf, 512);
+            m_searchText = buf;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    case WM_CTLCOLOREDIT:
+    {
+        HDC hdc = reinterpret_cast<HDC>(wparam);
+        SetTextColor(hdc, Rgb(230, 230, 230));
+        SetBkColor(hdc, Rgb(45, 45, 45));
+        return reinterpret_cast<LRESULT>(m_searchBrush);
+    }
     case WM_LBUTTONDOWN:
         HandleClick(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), false);
         return 0;
@@ -311,8 +348,6 @@ void ConsoleUI::DrawChrome(HDC dc, int width, int, const std::wstring& currentPa
     DrawTextLine(dc, Rect{address.x + 14, address.y, address.w - 28, address.h}, currentPath, Rgb(230, 230, 230));
 
     Rect search{width - 220, 54, 202, 34};
-    DrawPanel(dc, search, Rgb(45, 45, 45));
-    DrawTextLine(dc, Rect{search.x + 12, search.y, search.w - 24, search.h}, L"Search", Rgb(150, 150, 150));
 }
 
 void ConsoleUI::DrawSidebar(HDC dc, const Rect& r, const std::wstring&)
@@ -355,9 +390,27 @@ void ConsoleUI::DrawFiles(HDC dc, const Rect& r, const std::vector<FileEntry>& f
     int y = r.y + 52;
     int rowHeight = 34;
     int rows = std::max(0, (r.h - 62) / rowHeight);
-    for (int i = 0; i < rows && i < static_cast<int>(files.size()); ++i)
+    std::vector<const FileEntry*> filtered;
+    for (const FileEntry& f : files)
     {
-        const FileEntry& entry = files[i];
+        if (m_searchText.empty())
+        {
+            filtered.push_back(&f);
+        }
+        else
+        {
+            std::wstring nameLower = f.name;
+            std::wstring searchLower = m_searchText;
+            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::towlower);
+            std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), ::towlower);
+            if (nameLower.find(searchLower) != std::wstring::npos)
+                filtered.push_back(&f);
+        }
+    }
+
+    for (int i = 0; i < rows && i < static_cast<int>(filtered.size()); ++i)
+    {
+        const FileEntry& entry = *filtered[i];
         Rect row{r.x + 12, y + i * rowHeight, r.w - 24, rowHeight - 2};
         if (i % 2 == 0)
         {

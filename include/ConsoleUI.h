@@ -72,4 +72,7 @@ private:
     HFONT m_titleFont;
     std::vector<HitItem> m_hitItems;
     std::vector<QuickPath> m_quickPaths;
+    HWND m_searchBox;
+    HBRUSH m_searchBrush;
+    std::wstring m_searchText;
 };
