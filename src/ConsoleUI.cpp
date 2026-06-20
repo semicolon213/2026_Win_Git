@@ -1,4 +1,4 @@
-#include "../include/ConsoleUI.h"
+﻿#include "../include/ConsoleUI.h"
 
 #include <shellapi.h>
 #include <windowsx.h>
@@ -448,7 +448,12 @@ void ConsoleUI::DrawRightDashboard(HDC dc, const Rect& r, const std::deque<FileC
     for (int i = 0; i < 8 && i < static_cast<int>(changes.size()); ++i)
     {
         const FileChangeEvent& event = changes[i];
-        DrawTextLine(dc, Rect{r.x + 16, y + i * 24, r.w - 32, 22}, ChangeTypeToString(event.type) + L"  " + event.fileName, ColorForChange(event.type));
+        std::wstring line = ChangeTypeToString(event.type) + L"  " + event.fileName;
+        if (!event.detail.empty())
+        {
+            line += L"  (" + event.detail + L")";  // 수정 상세가 있으면 괄호 +
+        }
+        DrawTextLine(dc, Rect{ r.x + 16, y + i * 24, r.w - 32, 22 }, line, ColorForChange(event.type));
     }
 
     int hwY = r.y + 270;

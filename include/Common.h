@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -61,6 +61,7 @@ struct FileEntry
     bool isDirectory = false;
     ULONGLONG sizeBytes = 0;
     FILETIME lastWriteTime{};
+    int lineCount = -1;  // 텍스트 파일의 줄 수 -1이면 미계산 또는 대상 아님
 };
 
 struct FileChangeEvent
@@ -68,6 +69,7 @@ struct FileChangeEvent
     std::wstring fileName;
     FileChangeType type = FileChangeType::Unknown;
     ULONGLONG tick = 0;
+    std::wstring detail;  // 수정 상세 표시 ( A -> B) 정보가 없으면 빈 문자
 };
 
 struct HardwareSnapshot

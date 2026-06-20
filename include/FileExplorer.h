@@ -1,9 +1,10 @@
-#pragma once
+﻿#pragma once
 
 #include "Common.h"
 
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 class FileExplorer
 {
@@ -27,6 +28,8 @@ private:
     void PushChangeEvent(const std::wstring& fileName, FileChangeType type);
     FileChangeType ConvertAction(DWORD action) const;
     std::wstring ResolveCdTarget(const std::wstring& command) const;
+    std::wstring BuildModifiedDetail(const FileEntry& before, const FileEntry& after) const; // 수정 상세 문자열 생성
+    int CountTextLines(const std::wstring& fullPath, ULONGLONG sizeBytes) const; // 텍스트 파일 줄 수 (대상 아니면 -1)
 
     SharedState& m_state;
     CRITICAL_SECTION m_controlCs;
@@ -35,4 +38,5 @@ private:
     DWORD m_threadId;
     std::atomic<bool> m_stopRequested;
     std::wstring m_watchedPath;
+    std::unordered_map<std::wstring, FileEntry> m_previousFiles; // 이전 스캔 결과 (파일명 -> 정보) 비교용
 };
