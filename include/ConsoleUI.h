@@ -75,4 +75,13 @@ private:
     HWND m_searchBox;
     HBRUSH m_searchBrush;
     std::wstring m_searchText;
+    int m_fileScrollOffset = 0;
+    bool m_draggingScrollbar = false;
+    int m_dragStartY = 0;
+    int m_dragStartOffset = 0;
+    int m_scrollBarX = 0;
+    int m_scrollBarTrackY = 0;
+    int m_scrollBarTrackH = 0;
+    int m_scrollBarTotal = 0;
+    int m_scrollBarRows = 0;
 };

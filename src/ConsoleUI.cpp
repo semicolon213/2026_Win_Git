@@ -202,11 +202,65 @@ LRESULT ConsoleUI::HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
         SetBkColor(hdc, Rgb(45, 45, 45));
         return reinterpret_cast<LRESULT>(m_searchBrush);
     }
-    case WM_LBUTTONDOWN:
-        HandleClick(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), false);
+    case WM_MOUSEWHEEL:
+    {
+        POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        ScreenToClient(hwnd, &pt);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        int fileLeft = kSidebarWidth;
+        int fileRight = client.right - kDashboardWidth;
+        if (pt.x >= fileLeft && pt.x < fileRight)
+        {
+            int delta = GET_WHEEL_DELTA_WPARAM(wparam);
+            m_fileScrollOffset -= delta / WHEEL_DELTA;
+            if (m_fileScrollOffset < 0)
+                m_fileScrollOffset = 0;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         return 0;
+    }
+    case WM_LBUTTONDOWN:
+    {
+        int mx = GET_X_LPARAM(lparam);
+        int my = GET_Y_LPARAM(lparam);
+        if (m_scrollBarTotal > m_scrollBarRows &&
+            mx >= m_scrollBarX && mx < m_scrollBarX + 8 &&
+            my >= m_scrollBarTrackY && my < m_scrollBarTrackY + m_scrollBarTrackH)
+        {
+            m_draggingScrollbar = true;
+            m_dragStartY = my;
+            m_dragStartOffset = m_fileScrollOffset;
+            SetCapture(hwnd);
+            return 0;
+        }
+        HandleClick(mx, my, false);
+        return 0;
+    }
     case WM_LBUTTONDBLCLK:
         HandleClick(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam), true);
+        return 0;
+    case WM_MOUSEMOVE:
+        if (m_draggingScrollbar)
+        {
+            int my = GET_Y_LPARAM(lparam);
+            int maxScroll = m_scrollBarTotal - m_scrollBarRows;
+            int thumbH = std::max(20, m_scrollBarTrackH * m_scrollBarRows / m_scrollBarTotal);
+            int travelH = m_scrollBarTrackH - thumbH;
+            if (travelH > 0)
+            {
+                int delta = (my - m_dragStartY) * maxScroll / travelH;
+                m_fileScrollOffset = std::clamp(m_dragStartOffset + delta, 0, maxScroll);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        if (m_draggingScrollbar)
+        {
+            m_draggingScrollbar = false;
+            ReleaseCapture();
+        }
         return 0;
     case WM_TIMER:
         if (wparam == kRefreshTimer)
@@ -238,6 +292,8 @@ void ConsoleUI::ExecuteCommand(const std::wstring& command)
 {
     if (m_commandHandler)
     {
+        if (command.substr(0, 3) == L"cd ")
+            m_fileScrollOffset = 0;
         m_commandHandler(command);
         InvalidateRect(m_hwnd, nullptr, FALSE);
     }
@@ -387,6 +443,7 @@ void ConsoleUI::DrawFiles(HDC dc, const Rect& r, const std::vector<FileEntry>& f
     SelectObject(dc, m_font);
     DrawTextLine(dc, Rect{r.x + r.w - 150, r.y + 14, 120, 28}, L"Size", Rgb(170, 170, 170));
 
+    constexpr int kScrollBarWidth = 8;
     int y = r.y + 52;
     int rowHeight = 34;
     int rows = std::max(0, (r.h - 62) / rowHeight);
@@ -408,11 +465,16 @@ void ConsoleUI::DrawFiles(HDC dc, const Rect& r, const std::vector<FileEntry>& f
         }
     }
 
-    for (int i = 0; i < rows && i < static_cast<int>(filtered.size()); ++i)
+    int total = static_cast<int>(filtered.size());
+    int maxScroll = std::max(0, total - rows);
+    m_fileScrollOffset = std::clamp(m_fileScrollOffset, 0, maxScroll);
+
+    int colWidth = r.w - 24 - (total > rows ? kScrollBarWidth + 4 : 0);
+    for (int i = 0; i < rows && (m_fileScrollOffset + i) < total; ++i)
     {
-        const FileEntry& entry = *filtered[i];
-        Rect row{r.x + 12, y + i * rowHeight, r.w - 24, rowHeight - 2};
-        if (i % 2 == 0)
+        const FileEntry& entry = *filtered[m_fileScrollOffset + i];
+        Rect row{r.x + 12, y + i * rowHeight, colWidth, rowHeight - 2};
+        if ((m_fileScrollOffset + i) % 2 == 0)
         {
             DrawPanel(dc, row, Rgb(23, 23, 23));
         }
@@ -430,6 +492,30 @@ void ConsoleUI::DrawFiles(HDC dc, const Rect& r, const std::vector<FileEntry>& f
         {
             m_hitItems.push_back({row, L"open " + CombinePath(currentPath, entry.name), true});
         }
+    }
+
+    if (total > rows)
+    {
+        int trackH = r.h - 62;
+        int thumbH = std::max(20, trackH * rows / total);
+        int thumbY = y + (maxScroll > 0 ? (trackH - thumbH) * m_fileScrollOffset / maxScroll : 0);
+        int barX = r.x + r.w - kScrollBarWidth - 4;
+
+        m_scrollBarX = barX;
+        m_scrollBarTrackY = y;
+        m_scrollBarTrackH = trackH;
+        m_scrollBarTotal = total;
+        m_scrollBarRows = rows;
+
+        RECT track{barX, y, barX + kScrollBarWidth, y + trackH};
+        HBRUSH trackBrush = CreateSolidBrush(Rgb(35, 35, 35));
+        FillRect(dc, &track, trackBrush);
+        DeleteObject(trackBrush);
+
+        RECT thumb{barX, thumbY, barX + kScrollBarWidth, thumbY + thumbH};
+        HBRUSH thumbBrush = CreateSolidBrush(m_draggingScrollbar ? Rgb(160, 160, 160) : Rgb(90, 90, 90));
+        FillRect(dc, &thumb, thumbBrush);
+        DeleteObject(thumbBrush);
     }
 }
 
