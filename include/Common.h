@@ -62,6 +62,7 @@ struct FileEntry
     ULONGLONG sizeBytes = 0;
     FILETIME lastWriteTime{};
     int lineCount = -1;  // 텍스트 파일의 줄 수 -1이면 미계산 또는 대상 아님
+    std::vector<std::wstring> lines;  // 텍스트 파일의 줄 내용 (diff 비교용). 대상 아니면 비어 있음.
 };
 
 struct FileChangeEvent

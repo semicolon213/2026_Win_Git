@@ -6,119 +6,212 @@
 
 #include <cwctype>
 
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace
 {
-constexpr DWORD kNotifyFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE;
-constexpr DWORD kDebounceMs = 350;
-constexpr size_t kMaxEvents = 200;
+    constexpr DWORD kNotifyFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE;
+    constexpr DWORD kDebounceMs = 350;
+    constexpr size_t kMaxEvents = 200;
 
-bool IsDotEntry(const wchar_t* name)
-{
-    return wcscmp(name, L".") == 0 || wcscmp(name, L"..") == 0;
-}
-
-// 줄 수 계산(변경 확인)용 최대 크기 (100MB) 파일 목록 표시와는 무관, 더 큰 텍스트 파일은 줄 수만 생략하고 목록에는 정상 표시
-constexpr ULONGLONG kMaxLineCountBytes = 100ULL * 1024 * 1024;
-
-// 파일명이 텍스트 계열 확장자인지 판별 (줄 수 계산 대상만 true)
-bool IsTextFileName(const std::wstring& name)
-{
-    size_t dot = name.find_last_of(L'.');
-    if (dot == std::wstring::npos)
+    bool IsDotEntry(const wchar_t* name)
     {
+        return wcscmp(name, L".") == 0 || wcscmp(name, L"..") == 0;
+    }
+
+    // 줄 수 계산(변경 확인)용 최대 크기 (100MB) 파일 목록 표시와는 무관, 더 큰 텍스트 파일은 줄 수만 생략하고 목록에는 정상 표시
+    constexpr ULONGLONG kMaxLineCountBytes = 100ULL * 1024 * 1024;
+
+    // 파일명이 텍스트 계열 확장자인지 판별 (줄 수 계산 대상만 true)
+    bool IsTextFileName(const std::wstring& name)
+    {
+        size_t dot = name.find_last_of(L'.');
+        if (dot == std::wstring::npos)
+        {
+            return false;
+        }
+
+        std::wstring ext = name.substr(dot);
+        for (wchar_t& ch : ext)
+        {
+            ch = static_cast<wchar_t>(towlower(ch));
+        }
+
+        static const wchar_t* kTextExts[] = {
+            L".txt", L".md", L".log", L".csv", L".json", L".xml", L".html", L".htm",
+            L".css", L".js", L".ts", L".cpp", L".h", L".hpp", L".c", L".cc",
+            L".py", L".java", L".cs", L".rs", L".go", L".rb", L".php", L".sql",
+            L".sh", L".bat", L".ini", L".yml", L".yaml", L".cfg", L".conf"
+        };
+
+        for (const wchar_t* candidate : kTextExts)
+        {
+            if (ext == candidate)
+            {
+                return true;
+            }
+        }
         return false;
     }
 
-    std::wstring ext = name.substr(dot);
-    for (wchar_t& ch : ext)
+    std::wstring TrimLeft(std::wstring value)
     {
-        ch = static_cast<wchar_t>(towlower(ch));
+        value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](wchar_t ch) {
+            return ch != L' ' && ch != L'\t';
+            }));
+        return value;
     }
-
-    static const wchar_t* kTextExts[] = {
-        L".txt", L".md", L".log", L".csv", L".json", L".xml", L".html", L".htm",
-        L".css", L".js", L".ts", L".cpp", L".h", L".hpp", L".c", L".cc",
-        L".py", L".java", L".cs", L".rs", L".go", L".rb", L".php", L".sql",
-        L".sh", L".bat", L".ini", L".yml", L".yaml", L".cfg", L".conf"
-    };
-
-    for (const wchar_t* candidate : kTextExts)
+    // 바이트 수를 읽을 수 있게 1536 -> 1.5KB
+    std::wstring ToReadableSize(ULONGLONG bytes)
     {
-        if (ext == candidate)
+        const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB" };
+        double value = static_cast<double>(bytes);
+        int unitIndex = 0;
+        while (value >= 1024.0 && unitIndex < 3)
         {
-            return true;
+            value /= 1024.0;
+            ++unitIndex;
         }
-    }
-    return false;
-}
 
-std::wstring TrimLeft(std::wstring value)
-{
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), [](wchar_t ch) {
-        return ch != L' ' && ch != L'\t';
-    }));
-    return value;
-}
-// 바이트 수를 읽을 수 있게 1536 -> 1.5KB
-std::wstring ToReadableSize(ULONGLONG bytes)
-{
-    const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB" };
-    double value = static_cast<double>(bytes);
-    int unitIndex = 0;
-    while (value >= 1024.0 && unitIndex < 3)
-    {
-        value /= 1024.0;
-        ++unitIndex;
+        wchar_t buffer[64]{};
+        if (unitIndex == 0)
+        {
+            _snwprintf_s(buffer, _TRUNCATE, L"%lluB", bytes);
+        }
+        else
+        {
+            _snwprintf_s(buffer, _TRUNCATE, L"%.1f%s", value, units[unitIndex]);
+        }
+        return buffer;
     }
+    // FILETIME을 로컬 시각 "HH:MM:SS" 문자열로 변환 실패시 빈 문자열
+    std::wstring ToTimeString(const FILETIME& ft)
+    {
+        FILETIME local{};
+        if (!FileTimeToLocalFileTime(&ft, &local))
+        {
+            return L"";
+        }
 
-    wchar_t buffer[64]{};
-    if (unitIndex == 0)
-    {
-        _snwprintf_s(buffer, _TRUNCATE, L"%lluB", bytes);
-    }
-    else
-    {
-        _snwprintf_s(buffer, _TRUNCATE, L"%.1f%s", value, units[unitIndex]);
-    }
-    return buffer;
-}
-// FILETIME을 로컬 시각 "HH:MM:SS" 문자열로 변환 실패시 빈 문자열
-std::wstring ToTimeString(const FILETIME& ft)
-{
-    FILETIME local{};
-    if (!FileTimeToLocalFileTime(&ft, &local))
-    {
-        return L"";
-    }
+        SYSTEMTIME st{};
+        if (!FileTimeToSystemTime(&local, &st))
+        {
+            return L"";
+        }
 
-    SYSTEMTIME st{};
-    if (!FileTimeToSystemTime(&local, &st))
+        wchar_t buffer[16]{};
+        _snwprintf_s(buffer, _TRUNCATE, L"%02d:%02d", st.wHour, st.wMinute);
+        return buffer;
+    }
+    // 현재 로컬 시각을 "@HH:MM:SS" 형태로 반환 (이벤트 감지 시각용)
+    std::wstring NowTimeString()
     {
-        return L"";
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+
+        wchar_t buffer[16]{};
+        _snwprintf_s(buffer, _TRUNCATE, L"@%02d:%02d", st.wHour, st.wMinute);
+        return buffer;
     }
 
-    wchar_t buffer[16]{};
-    _snwprintf_s(buffer, _TRUNCATE, L"%02d:%02d", st.wHour, st.wMinute);
-    return buffer;
-}
-// 현재 로컬 시각을 "@HH:MM:SS" 형태로 반환 (이벤트 감지 시각용)
-std::wstring NowTimeString()
-{
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
+    // 두 문자열의 글자 단위 LCS 길이 표를 만들어 바뀐 부분만 +추가/-삭제로 표시
+    // 예: "안녕하세요" -> 안녕히가세요" 면 "-하 +히가
+    std::wstring DiffLineChars(const std::wstring& before, const std::wstring& after)
+    {
+        // 양쪽이 같으면 변화 없음
+        if (before == after)
+        {
+            return L"";
+        }
 
-    wchar_t buffer[16]{};
-    _snwprintf_s(buffer, _TRUNCATE, L"@%02d:%02d", st.wHour, st.wMinute);
-    return buffer;
-}
+        const size_t kMaxLen = 2000;  // 한 줄이 이보다 길면 글자 LCS 생략(통째로 표시)
+        if (before.size() > kMaxLen || after.size() > kMaxLen)
+        {
+            std::wstring result;
+            if (!before.empty())
+            {
+                result += L"-" + before;
+            }
+            if (!after.empty())
+            {
+                if (!result.empty()) result += L" ";
+                result += L"+" + after;
+            }
+            return result;
+        }
+
+        size_t n = before.size();
+        size_t m = after.size();
+
+        // LCS 길이 표 (n+1) x (m+1)
+        std::vector<std::vector<int>> lcs(n + 1, std::vector<int>(m + 1, 0));
+        for (size_t i = 1; i <= n; ++i)
+        {
+            for (size_t j = 1; j <= m; ++j)
+            {
+                if (before[i - 1] == after[j - 1])
+                {
+                    lcs[i][j] = lcs[i - 1][j - 1] + 1;
+                }
+                else
+                {
+                    lcs[i][j] = (lcs[i - 1][j] >= lcs[i][j - 1]) ? lcs[i - 1][j] : lcs[i][j - 1];
+                }
+            }
+        }
+
+        // 역추적하며 삭제(-)/추가(+) 글자를 수집
+        std::wstring removed;
+        std::wstring added;
+        size_t i = n, j = m;
+        std::wstring result;
+
+        // 뒤에서부터 모으므로 임시 버퍼에 담고 마지막에 뒤집기
+        std::wstring delBuf, addBuf;
+        while (i > 0 && j > 0)
+        {
+            if (before[i - 1] == after[j - 1])
+            {
+                --i; --j;  // 공통 글자: 표시 안 함
+            }
+            else if (lcs[i - 1][j] >= lcs[i][j - 1])
+            {
+                delBuf += before[i - 1];  // 삭제된 글자
+                --i;
+            }
+            else
+            {
+                addBuf += after[j - 1];   // 추가된 글자
+                --j;
+            }
+        }
+        while (i > 0) { delBuf += before[i - 1]; --i; }
+        while (j > 0) { addBuf += after[j - 1]; --j; }
+
+        std::reverse(delBuf.begin(), delBuf.end());
+        std::reverse(addBuf.begin(), addBuf.end());
+
+        if (!delBuf.empty())
+        {
+            result += L"-" + delBuf;
+        }
+        if (!addBuf.empty())
+        {
+            if (!result.empty()) result += L" ";
+            result += L"+" + addBuf;
+        }
+        return result;
+    }
 }
 
 FileExplorer::FileExplorer(SharedState& state)
     : m_state(state),
-      m_directoryHandle(INVALID_HANDLE_VALUE),
-      m_threadHandle(nullptr),
-      m_threadId(0),
-      m_stopRequested(false)
+    m_directoryHandle(INVALID_HANDLE_VALUE),
+    m_threadHandle(nullptr),
+    m_threadId(0),
+    m_stopRequested(false)
 {
     InitializeCriticalSection(&m_controlCs);
 }
@@ -239,6 +332,186 @@ int FileExplorer::CountTextLines(const std::wstring& fullPath, ULONGLONG sizeByt
     return lineCount;
 }
 
+// 텍스트 파일을 줄 단위로 읽어 vector로 반환 - 대상이 아니거나 읽기 실패 시 빈 vector
+// 파일을 직접 읽으므로 반드시 락 밖에서 호출해야
+std::vector<std::wstring> FileExplorer::ReadTextLines(const std::wstring& fullPath, ULONGLONG sizeBytes) const
+{
+    std::vector<std::wstring> lines;
+    if (sizeBytes > kMaxLineCountBytes)
+    {
+        return lines;  // 너무 큰 파일은 내용 비교 생략
+    }
+
+    HANDLE file = CreateFileW(
+        fullPath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        return lines;  // 열기 실패 시 빈 결과 (조용히 생략)
+    }
+
+    // 파일 전체를 바이트로 읽어들임
+    std::string raw;
+    char buffer[8 * 1024];
+    DWORD bytesRead = 0;
+    while (ReadFile(file, buffer, sizeof(buffer), &bytesRead, nullptr) && bytesRead > 0)
+    {
+        raw.append(buffer, bytesRead);
+    }
+    CloseHandle(file);
+
+    // UTF-8 -> UTF-16(wstring) 변환 실패하면 빈 결과
+    std::wstring text;
+    if (!raw.empty())
+    {
+        int needed = MultiByteToWideChar(CP_UTF8, 0, raw.data(), static_cast<int>(raw.size()), nullptr, 0);
+        if (needed > 0)
+        {
+            text.resize(needed);
+            MultiByteToWideChar(CP_UTF8, 0, raw.data(), static_cast<int>(raw.size()), &text[0], needed);
+        }
+    }
+
+    // 줄 단위로 분할 (\r\n, \n 모두 처리)
+    std::wstring current;
+    for (wchar_t ch : text)
+    {
+        if (ch == L'\n')
+        {
+            lines.push_back(current);
+            current.clear();
+        }
+        else if (ch != L'\r')
+        {
+            current += ch;
+        }
+    }
+    lines.push_back(current);  // 마지막 줄 (개행으로 안 끝나도 포함)
+
+    return lines;
+}
+
+// 2단계 LCS diff: 먼저 줄 단위로 비교해 바뀐 줄을 찾고
+// 짝지어지는 줄은 글자 단위(DiffLineChars)로, 순수 추가/삭제 줄은 통째로 표시
+std::wstring FileExplorer::BuildContentDiff(const std::vector<std::wstring>& before, const std::vector<std::wstring>& after) const
+{
+    size_t n = before.size();
+    size_t m = after.size();
+
+    // 안전벨트 줄 수가 매우 많으면 메모리를 폭증 위험이므로 수 변화만 표시
+    const size_t kMaxLcsLines = 3000;
+    if (n > kMaxLcsLines || m > kMaxLcsLines)
+    {
+        if (m > n)
+        {
+            wchar_t buf[48]{};
+            _snwprintf_s(buf, _TRUNCATE, L"+%zu줄(상세생략)", m - n);
+            return buf;
+        }
+        else if (n > m)
+        {
+            wchar_t buf[48]{};
+            _snwprintf_s(buf, _TRUNCATE, L"-%zu줄(상세생략)", n - m);
+            return buf;
+        }
+        return L"내용 변경(상세생략)";
+    }
+
+    // 줄 단위 LCS 표
+    std::vector<std::vector<int>> lcs(n + 1, std::vector<int>(m + 1, 0));
+    for (size_t i = 1; i <= n; ++i)
+    {
+        for (size_t j = 1; j <= m; ++j)
+        {
+            if (before[i - 1] == after[j - 1])
+            {
+                lcs[i][j] = lcs[i - 1][j - 1] + 1;
+            }
+            else
+            {
+                lcs[i][j] = (lcs[i - 1][j] >= lcs[i][j - 1]) ? lcs[i - 1][j] : lcs[i][j - 1];
+            }
+        }
+    }
+
+    // 역추적하며 변경된 줄들을 수집 (앞에서부터 순서대로 담기 위해 뒤에서 모아 뒤집음)
+    size_t i = n, j = m;
+    std::vector<std::pair<int, std::wstring>> rev;  // (종류, 텍스트) 종류: 0=삭제줄, 1=추가줄
+
+    while (i > 0 && j > 0)
+    {
+        if (before[i - 1] == after[j - 1])
+        {
+            --i; --j;  // 같은 줄: 변화 없음
+        }
+        else if (lcs[i - 1][j] >= lcs[i][j - 1])
+        {
+            rev.push_back({ 0, before[i - 1] });  // 삭제된 줄
+            --i;
+        }
+        else
+        {
+            rev.push_back({ 1, after[j - 1] });   // 추가된 줄
+            --j;
+        }
+    }
+    while (i > 0) { rev.push_back({ 0, before[i - 1] }); --i; }
+    while (j > 0) { rev.push_back({ 1, after[j - 1] }); --j; }
+
+    std::reverse(rev.begin(), rev.end());
+
+    // 인접한 삭제줄 + 추가줄쌍은 글자 단위 diff로 합쳐 표시 나머지는 통째로
+    std::wstring result;
+    size_t k = 0;
+    while (k < rev.size())
+    {
+        std::wstring piece;
+
+        // 쌍 판정: (삭제 다음 추가) 또는 (추가 다음 삭제)
+        if (k + 1 < rev.size() && rev[k].first != rev[k + 1].first)
+        {
+            const std::wstring& delLine = (rev[k].first == 0) ? rev[k].second : rev[k + 1].second;
+            const std::wstring& addLine = (rev[k].first == 1) ? rev[k].second : rev[k + 1].second;
+            piece = DiffLineChars(delLine, addLine);
+            k += 2;
+        }
+        else if (rev[k].first == 0)
+        {
+            if (!rev[k].second.empty())  // 빈 줄 삭제는 표시 생략
+            {
+                piece = L"-" + rev[k].second;
+            }
+            ++k;
+        }
+        else
+        {
+            if (!rev[k].second.empty())  // 빈 줄 추가는 표시 생략
+            {
+                piece = L"+" + rev[k].second;
+            }
+            ++k;
+        }
+
+        if (piece.empty())
+        {
+            continue;  // 빈 변경(빈 줄끼리 등)은 건너뜀
+        }
+        if (!result.empty())
+        {
+            result += L" / ";
+        }
+        result += piece;
+    }
+
+    return result;
+}
+
 std::wstring FileExplorer::BuildModifiedDetail(const FileEntry& before, const FileEntry& after) const
 {
     bool sizeChanged = before.sizeBytes != after.sizeBytes;
@@ -268,6 +541,20 @@ std::wstring FileExplorer::BuildModifiedDetail(const FileEntry& before, const Fi
             result += L", ";
         }
         result += lineBuf;
+    }
+
+    // 내용 변경 diff 표시 (양쪽 다 줄 내용이 있는 텍스트 파일일 때만)
+    if (!before.lines.empty() || !after.lines.empty())
+    {
+        std::wstring contentDiff = BuildContentDiff(before.lines, after.lines);
+        if (!contentDiff.empty())
+        {
+            if (!result.empty())
+            {
+                result += L", ";
+            }
+            result += contentDiff;
+        }
     }
 
     // 파일 수정 시각 표시
@@ -322,7 +609,11 @@ bool FileExplorer::ScanDirectoryIntoState(const std::wstring& path)
                 fullPath += L'\\';
             }
             fullPath += entry.name;
-            entry.lineCount = CountTextLines(fullPath, entry.sizeBytes);
+            entry.lines = ReadTextLines(fullPath, entry.sizeBytes);  // 줄 내용 (diff 비교용)
+            if (!entry.lines.empty())
+            {
+                entry.lineCount = static_cast<int>(entry.lines.size());
+            }
         }
         scanned.push_back(entry);
     } while (FindNextFileW(findHandle, &data));
@@ -335,10 +626,10 @@ bool FileExplorer::ScanDirectoryIntoState(const std::wstring& path)
             return a.isDirectory > b.isDirectory;
         }
         return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
-    });
+        });
 
-   // 이전 스냅샷과 비교해 수정된 파일이 어떻게 바뀌었는지 설명
-   // m_previousFiles는 이 감시 스레드에서만 접근하므로 이 스레드에서 락 필요 X
+    // 이전 스냅샷과 비교해 수정된 파일이 어떻게 바뀌었는지 설명
+    // m_previousFiles는 이 감시 스레드에서만 접근하므로 이 스레드에서 락 필요 X
     if (!m_previousFiles.empty())
     {
         for (const FileEntry& entry : scanned)

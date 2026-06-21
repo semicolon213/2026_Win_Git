@@ -30,6 +30,8 @@ private:
     std::wstring ResolveCdTarget(const std::wstring& command) const;
     std::wstring BuildModifiedDetail(const FileEntry& before, const FileEntry& after) const; // 수정 상세 문자열 생성
     int CountTextLines(const std::wstring& fullPath, ULONGLONG sizeBytes) const; // 텍스트 파일 줄 수 (대상 아니면 -1)
+    std::vector<std::wstring> ReadTextLines(const std::wstring& fullPath, ULONGLONG sizeBytes) const; // 텍스트 파일을 줄 단위로 읽음
+    std::wstring BuildContentDiff(const std::vector<std::wstring>& before, const std::vector<std::wstring>& after) const; // 2단계 LCS diff 문자열
 
     SharedState& m_state;
     CRITICAL_SECTION m_controlCs;
