@@ -41,4 +41,7 @@ private:
     std::atomic<bool> m_stopRequested;
     std::wstring m_watchedPath;
     std::unordered_map<std::wstring, FileEntry> m_previousFiles; // 이전 스캔 결과 (파일명 -> 정보) 비교용
+    std::unordered_map<std::wstring, std::vector<std::wstring>> m_pptxCache; // pptx 이전 내용 (파일명 -> 줄들). 스캔마다 지우지 않아 저장 중에도 유지
+    std::unordered_map<std::wstring, int> m_pptxSlideCount; // pptx 이전 장 수 (파일명 -> 장수). 장 추가/삭제 감지용
+    std::unordered_map<std::wstring, std::vector<std::wstring>> m_docxCache; // docx 이전 내용 (파일명 -> 줄들). Word도 rename 저장이라 캐시 필요
 };

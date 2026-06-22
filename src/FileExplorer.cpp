@@ -1,6 +1,7 @@
 ﻿#include "../include/FileExplorer.h"
 
 #include "../include/dprint.h"
+#include "../include/OfficeText.h"
 
 #include <algorithm>
 
@@ -21,7 +22,36 @@ namespace
         return wcscmp(name, L".") == 0 || wcscmp(name, L"..") == 0;
     }
 
-    // 줄 수 계산(변경 확인)용 최대 크기 (100MB) 파일 목록 표시와는 무관, 더 큰 텍스트 파일은 줄 수만 생략하고 목록에는 정상 표시
+    // Office 등이 저장 중 만드는 임시/잠금 파일인지 판별 (Live Changes 노이즈 제거)
+    // 예: pptE837.tmp, 44E4AD9D.tmp, ~$예제.pptx
+    bool IsTempOrLockName(const std::wstring& name)
+    {
+        if (name.empty())
+        {
+            return false;
+        }
+        if (name[0] == L'~')  // ~$ 로 시작하는 Office 잠금 파일
+        {
+            return true;
+        }
+        // .tmp 확장자 (대소문자 무시)
+        size_t dot = name.find_last_of(L'.');
+        if (dot != std::wstring::npos)
+        {
+            std::wstring ext = name.substr(dot);
+            for (wchar_t& ch : ext)
+            {
+                ch = static_cast<wchar_t>(towlower(ch));
+            }
+            if (ext == L".tmp")
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 줄 수 계산(변경 확인)용 최대 크기 (100MB) 파일 목록 표시와는 무관 더 큰 텍스트 파일은 줄 수만 생략하고 목록에는 정상 표시
     constexpr ULONGLONG kMaxLineCountBytes = 100ULL * 1024 * 1024;
 
     // 파일명이 텍스트 계열 확장자인지 판별 (줄 수 계산 대상만 true)
@@ -615,6 +645,34 @@ bool FileExplorer::ScanDirectoryIntoState(const std::wstring& path)
                 entry.lineCount = static_cast<int>(entry.lines.size());
             }
         }
+        else if (!entry.isDirectory && IsPptxFileName(entry.name))
+        {
+            // pptx는 슬라이드 텍스트를 추출해 줄 내용으로 사용 (내용 diff 대상)
+            std::wstring fullPath = path;
+            if (!fullPath.empty() && fullPath.back() != L'\\')
+            {
+                fullPath += L'\\';
+            }
+            fullPath += entry.name;
+            int slideCount = 0;
+            entry.lines = ExtractPptxText(fullPath, entry.sizeBytes, &slideCount);
+            entry.lineCount = slideCount;  // pptx는 lineCount를 "장 수"로 사용 (0이면 읽기 실패/저장 중)
+        }
+        else if (!entry.isDirectory && IsDocxFileName(entry.name))
+        {
+            // docx는 본문 텍스트를 추출해 내용 diff 대상으로 사용 (장 개념 없음)
+            std::wstring fullPath = path;
+            if (!fullPath.empty() && fullPath.back() != L'\\')
+            {
+                fullPath += L'\\';
+            }
+            fullPath += entry.name;
+            entry.lines = ExtractDocxText(fullPath, entry.sizeBytes);
+            if (!entry.lines.empty())
+            {
+                entry.lineCount = static_cast<int>(entry.lines.size());
+            }
+        }
         scanned.push_back(entry);
     } while (FindNextFileW(findHandle, &data));
 
@@ -639,6 +697,13 @@ bool FileExplorer::ScanDirectoryIntoState(const std::wstring& path)
                 continue;
             }
 
+            // pptx는 용량 변화가 압축 때문에 의미가 없으므로 이 루프에서 제외하고
+            // 아래 전용 블록이 내용 diff만으로 detail을 전담 docx도 동일
+            if (IsPptxFileName(entry.name) || IsDocxFileName(entry.name))
+            {
+                continue;
+            }
+
             auto found = m_previousFiles.find(entry.name);
             if (found == m_previousFiles.end())
             {
@@ -654,13 +719,156 @@ bool FileExplorer::ScanDirectoryIntoState(const std::wstring& path)
             ScopedCriticalSection lock(&m_state.cs);
             for (auto& change : m_state.changes)
             {
-                if (change.fileName == entry.name && change.type == FileChangeType::Modified)
+                // Modified는 물론, PowerPoint 등은 저장 시 임시파일을 rename하므로
+                // 같은 이름으로 새로 들어온 Rename+(RenamedNew)도 내용 비교 대상에 포함
+                if (change.fileName == entry.name &&
+                    (change.type == FileChangeType::Modified || change.type == FileChangeType::RenamedNew))
                 {
                     change.detail = detail;
                     break;  // push_front로 넣으므로 가장 최근 항목이 앞쪽에
                 }
             }
         }
+    }
+
+    // pptx 전용 비교: PowerPoint는 저장 시 파일을 잠깐 없앴다가 rename으로 되살리므로
+    // m_previousFiles(스캔마다 clear)로는 이전 내용을 놓치게 됨 따로 유지되는 m_pptxCache로 비교한
+    for (const FileEntry& entry : scanned)
+    {
+        if (entry.isDirectory || !IsPptxFileName(entry.name))
+        {
+            continue;
+        }
+
+        // 부작용 방지: 장 수가 0이면 읽기 실패 또는 저장 중 불완전 상태이므로 비교 x
+        int curSlides = entry.lineCount;  // pptx는 lineCount에 장 수가 들어있음
+        if (curSlides <= 0)
+        {
+            continue;
+        }
+
+        // 장 수 변화 계산 (이전 장 수를 알고, 0보다 클 때만 신뢰)
+        std::wstring slidePart;
+        auto cachedCount = m_pptxSlideCount.find(entry.name);
+        if (cachedCount != m_pptxSlideCount.end() && cachedCount->second > 0 &&
+            cachedCount->second != curSlides)
+        {
+            int delta = curSlides - cachedCount->second;
+            wchar_t buf[32]{};
+            _snwprintf_s(buf, _TRUNCATE, L"슬라이드%+d", delta);  // 예: 슬라이드+1, 슬라이드-2
+            slidePart = buf;
+        }
+
+        // 내용(텍스트) diff 계산
+        std::wstring contentDiff;
+        auto cached = m_pptxCache.find(entry.name);
+        if (cached != m_pptxCache.end() && cached->second != entry.lines)
+        {
+            contentDiff = BuildContentDiff(cached->second, entry.lines);
+        }
+
+        // 장 수 변화나 내용 변화 중 하나라도 있으면 "수정:"으로 표시
+        if (!slidePart.empty() || !contentDiff.empty())
+        {
+            std::wstring body;
+            if (!slidePart.empty())
+            {
+                body = slidePart;
+            }
+            if (!contentDiff.empty())
+            {
+                if (!body.empty()) body += L" | ";  // 장 변화와 텍스트 변화를 시각적으로 분리
+                body += L"텍스트: " + contentDiff;   // 어느 장의 텍스트인지는 contentDiff 안의 [N장]으로 표시됨
+            }
+
+            std::wstring afterTime = NowTimeString();
+            std::wstring newDetail = L"수정: " + body + (afterTime.empty() ? L"" : (L", " + afterTime));
+
+            ScopedCriticalSection lock(&m_state.cs);
+            for (auto& change : m_state.changes)
+            {
+                if (change.fileName == entry.name &&
+                    (change.type == FileChangeType::Modified || change.type == FileChangeType::RenamedNew))
+                {
+                    change.detail = newDetail;
+                    break;
+                }
+            }
+        }
+        else
+        {
+            // 변화 없는 pptx 이벤트(저장 과정 중간 rename 등)는 용량 등 노이즈를 정리
+            // 단, 직전에 "수정:"이 잡힌 이벤트는 덮지 않고 보존
+            ScopedCriticalSection lock(&m_state.cs);
+            for (auto& change : m_state.changes)
+            {
+                if (change.fileName == entry.name &&
+                    (change.type == FileChangeType::Modified || change.type == FileChangeType::RenamedNew))
+                {
+                    if (change.detail.rfind(L"수정: ", 0) != 0)
+                    {
+                        change.detail = NowTimeString();
+                    }
+                    break;
+                }
+            }
+        }
+
+        // 캐시 갱신 (사라져도 유지되도록 여기서만 갱신)
+        m_pptxCache[entry.name] = entry.lines;
+        m_pptxSlideCount[entry.name] = curSlides;
+    }
+
+    // docx 전용 비교: Word도 저장 시 rename으로 교체하므로 따로 유지되는 m_docxCache로 비교
+    // pptx와 달리 장 개념이 없어 순수 텍스트 diff만 표시
+    for (const FileEntry& entry : scanned)
+    {
+        if (entry.isDirectory || !IsDocxFileName(entry.name) || entry.lines.empty())
+        {
+            continue;
+        }
+
+        auto cached = m_docxCache.find(entry.name);
+        if (cached != m_docxCache.end() && cached->second != entry.lines)
+        {
+            std::wstring diff = BuildContentDiff(cached->second, entry.lines);
+            if (!diff.empty())
+            {
+                std::wstring afterTime = NowTimeString();
+                std::wstring newDetail = L"수정: 텍스트: " + diff + (afterTime.empty() ? L"" : (L", " + afterTime));
+
+                ScopedCriticalSection lock(&m_state.cs);
+                for (auto& change : m_state.changes)
+                {
+                    if (change.fileName == entry.name &&
+                        (change.type == FileChangeType::Modified || change.type == FileChangeType::RenamedNew))
+                    {
+                        change.detail = newDetail;
+                        break;
+                    }
+                }
+            }
+        }
+        else
+        {
+            // 변화 없는 docx 이벤트(저장 과정 중간 rename 등)는 노이즈를 정리한다.
+            // 단, 직전에 "수정:"이 잡힌 이벤트는 보존한다.
+            ScopedCriticalSection lock(&m_state.cs);
+            for (auto& change : m_state.changes)
+            {
+                if (change.fileName == entry.name &&
+                    (change.type == FileChangeType::Modified || change.type == FileChangeType::RenamedNew))
+                {
+                    if (change.detail.rfind(L"수정: ", 0) != 0)
+                    {
+                        change.detail = NowTimeString();
+                    }
+                    break;
+                }
+            }
+        }
+
+        m_docxCache[entry.name] = entry.lines;
     }
 
     m_previousFiles.clear();
@@ -687,7 +895,11 @@ DWORD WINAPI FileExplorer::WatchThreadThunk(LPVOID param)
 
 DWORD FileExplorer::WatchLoop()
 {
-    alignas(DWORD) BYTE buffer[16 * 1024]{};
+    // 16KB 변경 알림 버퍼를 스택이 아닌 힙에 둔다(C6262 회피).
+    // FILE_NOTIFY_INFORMATION은 DWORD 정렬이 필요하므로 DWORD 벡터로 잡아 정렬을 보장한다.
+    std::vector<DWORD> bufferStorage(16 * 1024 / sizeof(DWORD), 0);
+    BYTE* buffer = reinterpret_cast<BYTE*>(bufferStorage.data());
+    const DWORD bufferSize = static_cast<DWORD>(bufferStorage.size() * sizeof(DWORD));
 
     while (!m_stopRequested.load())
     {
@@ -695,7 +907,7 @@ DWORD FileExplorer::WatchLoop()
         BOOL ok = ReadDirectoryChangesW(
             m_directoryHandle,
             buffer,
-            static_cast<DWORD>(sizeof(buffer)),
+            bufferSize,
             FALSE,
             kNotifyFilter,
             &bytesReturned,
@@ -758,6 +970,9 @@ bool FileExplorer::RestartWatcherLocked(const std::wstring& newPath)
     m_stopRequested.store(false);
     m_watchedPath = newPath;
     m_previousFiles.clear();  // 이전 폴더의 스냅샷은 더 이상 유효하지 않음
+    m_pptxCache.clear();      // pptx 캐시도 폴더가 바뀌면 무효
+    m_pptxSlideCount.clear(); // pptx 장 수 캐시도 무효
+    m_docxCache.clear();      // docx 캐시도 무효
 
     if (!ScanDirectoryIntoState(newPath))
     {
@@ -811,6 +1026,12 @@ void FileExplorer::CloseDirectoryHandle()
 
 void FileExplorer::PushChangeEvent(const std::wstring& fileName, FileChangeType type)
 {
+    // Office 등의 임시/잠금 파일은 노이즈이므로 기록하지 않는다.
+    if (IsTempOrLockName(fileName))
+    {
+        return;
+    }
+
     ULONGLONG now = GetTickCount64();
 
     ScopedCriticalSection lock(&m_state.cs);

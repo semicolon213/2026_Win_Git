@@ -283,7 +283,20 @@ void ConsoleUI::Render(HDC targetDc)
     std::wstring currentPath;
     {
         ScopedCriticalSection lock(&m_state.cs);
-        files = m_state.files;
+        // UI는 파일명/크기/종류만 그리므로 무거운 lines(파일 내용)는 복사 X
+        // 100ms 타이머마다 전체 파일 내용을 복사하던 부하를 없애 화면 갱신을 가볍게 (검색창 깜빡임 방지)
+        files.reserve(m_state.files.size());
+        for (const FileEntry& src : m_state.files)
+        {
+            FileEntry e;
+            e.name = src.name;
+            e.isDirectory = src.isDirectory;
+            e.sizeBytes = src.sizeBytes;
+            e.lastWriteTime = src.lastWriteTime;
+            e.lineCount = src.lineCount;
+            // e.lines 는 일부러 복사하지 않음 (UI 미사용)
+            files.push_back(std::move(e));
+        }
         changes = m_state.changes;
         hardware = m_state.hardware;
         currentPath = m_state.currentPath;
