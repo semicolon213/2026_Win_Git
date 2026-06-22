@@ -22,7 +22,7 @@ namespace
         return wcscmp(name, L".") == 0 || wcscmp(name, L"..") == 0;
     }
 
-    // Office 등이 저장 중 만드는 임시/잠금 파일인지 판별 (Live Changes 노이즈 제거)
+    // Office 등이 저장 중 만드는 임시/잠금 파일인지 판별 (Live Changes 노이즈 제거).
     // 예: pptE837.tmp, 44E4AD9D.tmp, ~$예제.pptx
     bool IsTempOrLockName(const std::wstring& name)
     {
@@ -51,7 +51,7 @@ namespace
         return false;
     }
 
-    // 줄 수 계산(변경 확인)용 최대 크기 (100MB) 파일 목록 표시와는 무관 더 큰 텍스트 파일은 줄 수만 생략하고 목록에는 정상 표시
+    // 줄 수 계산(변경 확인)용 최대 크기 (100MB) 파일 목록 표시와는 무관, 더 큰 텍스트 파일은 줄 수만 생략하고 목록에는 정상 표시
     constexpr ULONGLONG kMaxLineCountBytes = 100ULL * 1024 * 1024;
 
     // 파일명이 텍스트 계열 확장자인지 판별 (줄 수 계산 대상만 true)
@@ -654,9 +654,37 @@ bool FileExplorer::ScanDirectoryIntoState(const std::wstring& path)
                 fullPath += L'\\';
             }
             fullPath += entry.name;
-            int slideCount = 0;
-            entry.lines = ExtractPptxText(fullPath, entry.sizeBytes, &slideCount);
-            entry.lineCount = slideCount;  // pptx는 lineCount를 "장 수"로 사용 (0이면 읽기 실패/저장 중)
+
+            // 수정시각+크기가 직전 추출과 같으면 ZIP을 다시 열지 않고 캐시를 재사용
+            // PowerPoint가 저장 중 파일을 여러 번 건드릴 때 불완전한 재추출을 줄여줌
+            ULONGLONG curTime = (static_cast<ULONGLONG>(entry.lastWriteTime.dwHighDateTime) << 32)
+                | entry.lastWriteTime.dwLowDateTime;
+            auto stampIt = m_officeStamp.find(entry.name);
+            auto cacheIt = m_pptxCache.find(entry.name);
+            auto countIt = m_pptxSlideCount.find(entry.name);
+            if (stampIt != m_officeStamp.end() &&
+                stampIt->second.writeTime == curTime &&
+                stampIt->second.sizeBytes == entry.sizeBytes &&
+                cacheIt != m_pptxCache.end() &&
+                countIt != m_pptxSlideCount.end())
+            {
+                // 안 바뀜: 캐시 재사용 (ZIP 추출 생략)
+                entry.lines = cacheIt->second;
+                entry.lineCount = countIt->second;
+            }
+            else
+            {
+                // 바뀜(또는 첫 스캔): 실제로 추출
+                int slideCount = 0;
+                entry.lines = ExtractPptxText(fullPath, entry.sizeBytes, &slideCount);
+                entry.lineCount = slideCount;  // pptx는 lineCount를 "장 수"로 사용 (0이면 읽기 실패/저장 중)
+                // 추출 성공(슬라이드 1개 이상)일 때만 stamp를 기록
+                // 저장 중이라 0장으로 읽힌 경우엔 기록하지 않아 다음 스캔에서 다시 추출
+                if (slideCount > 0)
+                {
+                    m_officeStamp[entry.name] = { curTime, entry.sizeBytes };
+                }
+            }
         }
         else if (!entry.isDirectory && IsDocxFileName(entry.name))
         {
@@ -667,10 +695,31 @@ bool FileExplorer::ScanDirectoryIntoState(const std::wstring& path)
                 fullPath += L'\\';
             }
             fullPath += entry.name;
-            entry.lines = ExtractDocxText(fullPath, entry.sizeBytes);
-            if (!entry.lines.empty())
+
+            // 수정시각+크기가 직전 추출과 같으면 ZIP을 다시 열지 않고 캐시를 재사용한다.
+            ULONGLONG curTime = (static_cast<ULONGLONG>(entry.lastWriteTime.dwHighDateTime) << 32)
+                | entry.lastWriteTime.dwLowDateTime;
+            auto stampIt = m_officeStamp.find(entry.name);
+            auto cacheIt = m_docxCache.find(entry.name);
+            if (stampIt != m_officeStamp.end() &&
+                stampIt->second.writeTime == curTime &&
+                stampIt->second.sizeBytes == entry.sizeBytes &&
+                cacheIt != m_docxCache.end())
             {
+                // 안 바뀜: 캐시 재사용 (ZIP 추출 생략)
+                entry.lines = cacheIt->second;
                 entry.lineCount = static_cast<int>(entry.lines.size());
+            }
+            else
+            {
+                // 바뀜(또는 첫 스캔): 실제로 추출
+                entry.lines = ExtractDocxText(fullPath, entry.sizeBytes);
+                if (!entry.lines.empty())
+                {
+                    entry.lineCount = static_cast<int>(entry.lines.size());
+                    // 추출 성공일 때만 stamp 기록 (저장 중 빈 결과는 기록 안 함)
+                    m_officeStamp[entry.name] = { curTime, entry.sizeBytes };
+                }
             }
         }
         scanned.push_back(entry);
@@ -732,7 +781,7 @@ bool FileExplorer::ScanDirectoryIntoState(const std::wstring& path)
     }
 
     // pptx 전용 비교: PowerPoint는 저장 시 파일을 잠깐 없앴다가 rename으로 되살리므로
-    // m_previousFiles(스캔마다 clear)로는 이전 내용을 놓치게 됨 따로 유지되는 m_pptxCache로 비교한
+    // m_previousFiles(스캔마다 clear)로는 이전 내용을 놓친다. 따로 유지되는 m_pptxCache로 비교
     for (const FileEntry& entry : scanned)
     {
         if (entry.isDirectory || !IsPptxFileName(entry.name))
@@ -740,7 +789,7 @@ bool FileExplorer::ScanDirectoryIntoState(const std::wstring& path)
             continue;
         }
 
-        // 부작용 방지: 장 수가 0이면 읽기 실패 또는 저장 중 불완전 상태이므로 비교 x
+        // 부작용 방지: 장 수가 0이면 읽기 실패 또는 저장 중 불완전 상태이므로 비교 X
         int curSlides = entry.lineCount;  // pptx는 lineCount에 장 수가 들어있음
         if (curSlides <= 0)
         {
@@ -851,7 +900,7 @@ bool FileExplorer::ScanDirectoryIntoState(const std::wstring& path)
         }
         else
         {
-            // 변화 없는 docx 이벤트(저장 과정 중간 rename 등)는 노이즈를 정리한다.
+            // 변화 없는 docx 이벤트(저장 과정 중간 rename 등)는 노이즈를 정리
             // 단, 직전에 "수정:"이 잡힌 이벤트는 보존한다.
             ScopedCriticalSection lock(&m_state.cs);
             for (auto& change : m_state.changes)
@@ -895,8 +944,8 @@ DWORD WINAPI FileExplorer::WatchThreadThunk(LPVOID param)
 
 DWORD FileExplorer::WatchLoop()
 {
-    // 16KB 변경 알림 버퍼를 스택이 아닌 힙에 둔다(C6262 회피).
-    // FILE_NOTIFY_INFORMATION은 DWORD 정렬이 필요하므로 DWORD 벡터로 잡아 정렬을 보장한다.
+    // 16KB 변경 알림 버퍼를 스택이 아닌 힙에 (C6262 회피)
+    // FILE_NOTIFY_INFORMATION은 DWORD 정렬이 필요하므로 DWORD 벡터로 잡아 정렬을 보장
     std::vector<DWORD> bufferStorage(16 * 1024 / sizeof(DWORD), 0);
     BYTE* buffer = reinterpret_cast<BYTE*>(bufferStorage.data());
     const DWORD bufferSize = static_cast<DWORD>(bufferStorage.size() * sizeof(DWORD));
@@ -973,6 +1022,7 @@ bool FileExplorer::RestartWatcherLocked(const std::wstring& newPath)
     m_pptxCache.clear();      // pptx 캐시도 폴더가 바뀌면 무효
     m_pptxSlideCount.clear(); // pptx 장 수 캐시도 무효
     m_docxCache.clear();      // docx 캐시도 무효
+    m_officeStamp.clear();    // 오피스 파일 시각+크기 기록도 무효
 
     if (!ScanDirectoryIntoState(newPath))
     {

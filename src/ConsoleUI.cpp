@@ -457,7 +457,9 @@ void ConsoleUI::DrawRightDashboard(HDC dc, const Rect& r, const std::deque<FileC
     DrawTextLine(dc, Rect{r.x + 16, r.y + 14, r.w - 32, 26}, L"Live Changes", Rgb(230, 230, 230));
     SelectObject(dc, m_font);
 
+    // 줄바꿈 수정
     int y = r.y + 48;
+    const int liveChangesBottom = r.y + 270 - 8;  // Hardware 영역(hwY=r.y+270) 직전까지만 그리기
     for (int i = 0; i < 8 && i < static_cast<int>(changes.size()); ++i)
     {
         const FileChangeEvent& event = changes[i];
@@ -466,7 +468,58 @@ void ConsoleUI::DrawRightDashboard(HDC dc, const Rect& r, const std::deque<FileC
         {
             line += L"  (" + event.detail + L")";  // 수정 상세가 있으면 괄호 +
         }
-        DrawTextLine(dc, Rect{ r.x + 16, y + i * 24, r.w - 32, 22 }, line, ColorForChange(event.type));
+
+        // 줄이 패널 폭을 넘으면 자르지 않고 줄바꿈으로 표시
+        const int textWidth = r.w - 32;
+        const int kMaxLineHeight = 22 * 4;  // 한 이벤트는 최대 4줄까지만
+
+        RECT calc{ r.x + 16, y, r.x + 16 + textWidth, y + 22 };
+        DrawTextW(dc, line.c_str(), static_cast<int>(line.size()), &calc,
+            DT_LEFT | DT_WORDBREAK | DT_CALCRECT);
+        int lineHeight = calc.bottom - calc.top;
+
+        // 4줄을 넘으면, 4줄에 들어갈 만큼만 남기고 끝에 ...
+        if (lineHeight > kMaxLineHeight)
+        {
+            size_t lo = 0;
+            size_t hi = line.size();
+            size_t best = 0;
+            while (lo <= hi)
+            {
+                size_t mid = (lo + hi) / 2;
+                std::wstring candidate = line.substr(0, mid) + L"...";
+                RECT test{ r.x + 16, y, r.x + 16 + textWidth, y + 22 };
+                DrawTextW(dc, candidate.c_str(), static_cast<int>(candidate.size()), &test,
+                    DT_LEFT | DT_WORDBREAK | DT_CALCRECT);
+                if (test.bottom - test.top <= kMaxLineHeight)
+                {
+                    best = mid;
+                    lo = mid + 1;
+                }
+                else
+                {
+                    if (mid == 0) { break; }
+                    hi = mid - 1;
+                }
+            }
+            line = line.substr(0, best) + L"...";
+            lineHeight = kMaxLineHeight;
+        }
+        if (lineHeight < 22)
+        {
+            lineHeight = 22;
+        }
+
+        if (y + lineHeight > liveChangesBottom)
+        {
+            break;
+        }
+
+        RECT draw{ r.x + 16, y, r.x + 16 + textWidth, y + lineHeight };
+        SetTextColor(dc, ColorForChange(event.type));
+        DrawTextW(dc, line.c_str(), static_cast<int>(line.size()), &draw, DT_LEFT | DT_WORDBREAK);
+
+        y += lineHeight + 8;
     }
 
     int hwY = r.y + 270;
