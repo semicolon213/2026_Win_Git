@@ -108,6 +108,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalIncludeDirectories>include</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -137,6 +138,7 @@
     <ClCompile Include="..\src\FileExplorer.cpp" />
     <ClCompile Include="..\src\HardwareMonitor.cpp" />
     <ClCompile Include="..\src\main.cpp" />
+    <ClCompile Include="..\src\OfficeText.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\include\Common.h" />
@@ -144,6 +146,8 @@
     <ClInclude Include="..\include\dprint.h" />
     <ClInclude Include="..\include\FileExplorer.h" />
     <ClInclude Include="..\include\HardwareMonitor.h" />
+    <ClInclude Include="..\include\miniz_single.h" />
+    <ClInclude Include="..\include\OfficeText.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

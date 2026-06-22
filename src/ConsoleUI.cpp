@@ -1,4 +1,4 @@
-#include "../include/ConsoleUI.h"
+﻿#include "../include/ConsoleUI.h"
 
 #include <shellapi.h>
 #include <windowsx.h>
@@ -339,7 +339,20 @@ void ConsoleUI::Render(HDC targetDc)
     std::wstring currentPath;
     {
         ScopedCriticalSection lock(&m_state.cs);
-        files = m_state.files;
+        // UI는 파일명/크기/종류만 그리므로 무거운 lines(파일 내용)는 복사 X
+        // 100ms 타이머마다 전체 파일 내용을 복사하던 부하를 없애 화면 갱신을 가볍게 (검색창 깜빡임 방지)
+        files.reserve(m_state.files.size());
+        for (const FileEntry& src : m_state.files)
+        {
+            FileEntry e;
+            e.name = src.name;
+            e.isDirectory = src.isDirectory;
+            e.sizeBytes = src.sizeBytes;
+            e.lastWriteTime = src.lastWriteTime;
+            e.lineCount = src.lineCount;
+            // e.lines 는 일부러 복사하지 않음 (UI 미사용)
+            files.push_back(std::move(e));
+        }
         changes = m_state.changes;
         hardware = m_state.hardware;
         currentPath = m_state.currentPath;
@@ -530,11 +543,69 @@ void ConsoleUI::DrawRightDashboard(HDC dc, const Rect& r, const std::deque<FileC
     DrawTextLine(dc, Rect{r.x + 16, r.y + 14, r.w - 32, 26}, L"Live Changes", Rgb(230, 230, 230));
     SelectObject(dc, m_font);
 
+    // 줄바꿈 수정
     int y = r.y + 48;
+    const int liveChangesBottom = r.y + 270 - 8;  // Hardware 영역(hwY=r.y+270) 직전까지만 그리기
     for (int i = 0; i < 8 && i < static_cast<int>(changes.size()); ++i)
     {
         const FileChangeEvent& event = changes[i];
-        DrawTextLine(dc, Rect{r.x + 16, y + i * 24, r.w - 32, 22}, ChangeTypeToString(event.type) + L"  " + event.fileName, ColorForChange(event.type));
+        std::wstring line = ChangeTypeToString(event.type) + L"  " + event.fileName;
+        if (!event.detail.empty())
+        {
+            line += L"  (" + event.detail + L")";  // 수정 상세가 있으면 괄호 +
+        }
+
+        // 줄이 패널 폭을 넘으면 자르지 않고 줄바꿈으로 표시
+        const int textWidth = r.w - 32;
+        const int kMaxLineHeight = 22 * 4;  // 한 이벤트는 최대 4줄까지만
+
+        RECT calc{ r.x + 16, y, r.x + 16 + textWidth, y + 22 };
+        DrawTextW(dc, line.c_str(), static_cast<int>(line.size()), &calc,
+            DT_LEFT | DT_WORDBREAK | DT_CALCRECT);
+        int lineHeight = calc.bottom - calc.top;
+
+        // 4줄을 넘으면, 4줄에 들어갈 만큼만 남기고 끝에 ...
+        if (lineHeight > kMaxLineHeight)
+        {
+            size_t lo = 0;
+            size_t hi = line.size();
+            size_t best = 0;
+            while (lo <= hi)
+            {
+                size_t mid = (lo + hi) / 2;
+                std::wstring candidate = line.substr(0, mid) + L"...";
+                RECT test{ r.x + 16, y, r.x + 16 + textWidth, y + 22 };
+                DrawTextW(dc, candidate.c_str(), static_cast<int>(candidate.size()), &test,
+                    DT_LEFT | DT_WORDBREAK | DT_CALCRECT);
+                if (test.bottom - test.top <= kMaxLineHeight)
+                {
+                    best = mid;
+                    lo = mid + 1;
+                }
+                else
+                {
+                    if (mid == 0) { break; }
+                    hi = mid - 1;
+                }
+            }
+            line = line.substr(0, best) + L"...";
+            lineHeight = kMaxLineHeight;
+        }
+        if (lineHeight < 22)
+        {
+            lineHeight = 22;
+        }
+
+        if (y + lineHeight > liveChangesBottom)
+        {
+            break;
+        }
+
+        RECT draw{ r.x + 16, y, r.x + 16 + textWidth, y + lineHeight };
+        SetTextColor(dc, ColorForChange(event.type));
+        DrawTextW(dc, line.c_str(), static_cast<int>(line.size()), &draw, DT_LEFT | DT_WORDBREAK);
+
+        y += lineHeight + 8;
     }
 
     int hwY = r.y + 270;
